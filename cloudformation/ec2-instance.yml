@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create a temporary EC2 instance for testing.
+
+Parameters:
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+
+  KeyName:
+    Description: Name of an existing EC2 Key Pair
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: test-ec2-instance
+
+  SecurityGroup:
+    Description: Security Group ID for the instance
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-01f7f4b93d2a0f127 # BookstoreSecurityGroup
+
+  AMI:
+    Description: Amazon Machine Image (AMI) ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-053a45fff0a704a47 # Amazon Linux 2023 x86
+
+Resources:
+  TempEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      ImageId: !Ref AMI
+      Tags:
+        - Key: Name
+          Value: TempEC2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo "Running setup on temporary EC2 instance..."
+          yum update -y
+          yum install -y docker
+          service docker start
+          usermod -aG docker ec2-user
+          echo "Setup complete."
+
+Outputs:
+  InstanceId:
+    Description: ID of the created EC2 instance
+    Value: !Ref TempEC2Instance
+  PublicIp:
+    Description: Public IP of the EC2 instance
+    Value: !GetAtt TempEC2Instance.PublicIp

@@ -1,0 +1,349 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch: 
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO_PATH: source-repo
+      INFRA_REPO_PATH: infra-repo
+      TEMP_EC2_STACK_NAME: temp-ec2-stack
+      SSH_FILE_NAME: test-ec2-instance
+      AWS_REGION: us-east-1
+      AWS_ID: '035863456454'
+
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: aawihardja-usfca/bookstore
+          path: ${{ env.SOURCE_REPO_PATH }}
+
+      - name: Checkout infrastructure repo
+        uses: actions/checkout@v4
+        with:
+          repository: aawihardja-usfca/bookstore-infra
+          path: ${{ env.INFRA_REPO_PATH }}
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Launch TempEC2
+        run: |
+          aws cloudformation deploy \
+          --template-file ${{ env.INFRA_REPO_PATH }}/cloudformation/ec2-instance.yml \
+          --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
+          --capabilities CAPABILITY_NAMED_IAM
+
+      - name: Wait for EC2 instance to be ready
+        run: sleep 30
+
+      - name: Get EC2 public IP
+        id: get-ip
+        run: |
+          PUBLIC_IP=$(aws cloudformation describe-stacks --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='PublicIp'].OutputValue" --output text)
+          echo "PUBLIC_IP=${PUBLIC_IP}" >> $GITHUB_ENV
+
+      - name: Add SSH private key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+          chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+
+      - name: Copy source-repo to EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.SOURCE_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.SOURCE_REPO_PATH }}
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.INFRA_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.INFRA_REPO_PATH }}
+
+      - name: Test Docker installation
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+          docker --version
+
+      - name: Install Docker, setup environment variables, build an image, instantiate containers, and run containers
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+            sudo yum update -y
+            sudo yum install -y docker
+            sudo service docker start
+            sudo usermod -aG docker ec2-user
+            echo "Docker installed successfully!"
+            sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+            docker-compose --version
+            export RDS_HOST=${{ secrets.RDS_HOST }}
+            export RDS_USER=${{ secrets.RDS_USER }}
+            export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
+            export RDS_NAME=${{ secrets.RDS_NAME }}
+            cd ~/${{ env.INFRA_REPO_PATH }}
+            docker-compose -f compose-test.yml up --build -d
+          EOF
+
+      - name: Delete the Temp EC2 stack
+        run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
+      
+      # - name: Initialize RDS MySQL
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       sudo yum update -y
+      #       sudo yum install -y mariadb105
+      #       echo "MySQL client installed."
+          
+      #       mysql -h ${{ secrets.RDS_HOST }} \
+      #       -u ${{ secrets.RDS_USER }} \
+      #       -p${{ secrets.RDS_PASSWORD }} \
+      #       -P ${{ secrets.RDS_PORT }} \
+      #       -e "CREATE DATABASE IF NOT EXISTS ${{ secrets.RDS_NAME }};"
+
+      #       echo "Database created."
+      #       mysql -h ${{ secrets.RDS_HOST }} \
+      #             -u ${{ secrets.RDS_USER }} \
+      #             -p${{ secrets.RDS_PASSWORD }} \
+      #             -P ${{ secrets.RDS_PORT }} \
+      #             ${{ secrets.RDS_NAME }} < ~/source-repo/database/init.sql
+
+      #       echo "Database initialized successfully."
+      #     EOF
+
+      # - name: Login to AWS ECR
+      #   id: login-ecr
+      #   uses: aws-actions/amazon-ecr-login@v2
+
+      # - name: Run smoke tests
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       echo "Running smoke tests..."
+      #       cd ~/${{ env.SOURCE_REPO_PATH }}
+          
+      #       chmod +x frontend/tests/homepage.test.sh
+      #       ./frontend/tests/homepage.test.sh
+      #       if [ $? -ne 0 ]; then
+      #         echo "Frontend test failed!"
+      #         exit 1
+      #       fi
+      #       echo "Frontend test passed!"
+
+      #       # Run API test
+      #       chmod +x backend/tests/api.test.sh
+      #       ./backend/tests/api.test.sh
+      #       if [ $? -ne 0 ]; then
+      #         echo "Backend test failed!"
+      #         exit 1
+      #       fi
+      #       echo "Backend test passed!"
+      #     EOF
+
+      # - name: Build and push Docker image to ECR
+      #   if: success()
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       echo "Logging in to AWS ECR.."
+      #       export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+      #       export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #       export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
+      #       aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      #       echo "Tagging image.."
+      #       cd /home/ec2-user/infra-repo
+      #       docker tag infra-repo-backend:latest ${{ secrets.AWS_ECR_REPO }}:backend-latest
+      #       docker tag infra-repo-frontend:latest ${{ secrets.AWS_ECR_REPO }}:frontend-latest
+          
+      #       echo "Pushing the images to ECR.."
+      #       docker push ${{ secrets.AWS_ECR_REPO }}:backend-latest
+      #       docker push ${{ secrets.AWS_ECR_REPO }}:frontend-latest
+            
+      #       echo "Docker images pushed to ECR successfully!"
+      #     EOF
+
+      # - name: Build Docker images
+      #   env:
+      #     ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      #     BACKEND_REPOSITORY: bookstore-backend
+      #     FRONTEND_REPOSITORY: bookstore-frontend
+      #     IMAGE_TAG: ${{ github.sha }}
+      #   run: |
+      #     docker build -t $ECR_REGISTRY/$BACKEND_REPOSITORY:latest ./backend
+      #     docker build -t $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest ./frontend
+
+      # - name: Push Docker images
+      #   env:
+      #     ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      #     BACKEND_REPOSITORY: bookstore-backend
+      #     FRONTEND_REPOSITORY: bookstore-frontend
+      #     IMAGE_TAG: ${{ github.sha }}
+      #   run: |
+      #     docker push $ECR_REGISTRY/$BACKEND_REPOSITORY:latest
+      #     docker push $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest
+
+
+
+# name: Nightly Deployment
+
+# on:
+#   push:
+#     branches:
+#       - main
+# #  schedule:
+# #    - cron: "0 2 * * *"
+#   workflow_dispatch:
+
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout infra-repo
+#         uses: actions/checkout@v3
+#         with:
+#           repository: knakatasf/devops-midterm-infra-repo
+#           token: ${{ secrets.ACCESS_TOKEN }}
+#           path: infra-repo
+
+#       - name: Checkout source-repo
+#         uses: actions/checkout@v3
+#         with:
+#           repository: knakatasf/crud-react-node-mySQL-go
+#           token: ${{ secrets.ACCESS_TOKEN }}
+#           path: source-repo
+
+#       - name: Configure AWS credentials
+#         uses: aws-actions/configure-aws-credentials@v1
+#         with:
+#           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+#           aws-region: us-east-1
+
+#       - name: Delete previous EC2 stack, if exists
+#         continue-on-error: true
+#         run: |
+#           aws cloudformation delete-stack --stack-name temp-ec2-stack
+#           echo "Waiting for stack deletion..."
+#           aws cloudformation wait stack-delete-complete --stack-name temp-ec2-stack
+
+#       - name: Launch an EC2 instance
+#         run: |
+#           aws cloudformation deploy \
+#           --template-file infra-repo/cloudformation/ec2-instance.yml \
+#           --stack-name temp-ec2-stack \
+#           --capabilities CAPABILITY_NAMED_IAM
+
+#       - name: Wait for EC2 instance to be ready
+#         run: sleep 30
+
+#       - name: Get EC2 public IP
+#         id: get-ip
+#         run: |
+#           PUBLIC_IP=$(aws cloudformation describe-stacks --stack-name temp-ec2-stack \
+#             --query "Stacks[0].Outputs[?OutputKey=='PublicIp'].OutputValue" --output text)
+#           echo "PUBLIC_IP=${PUBLIC_IP}" >> $GITHUB_ENV
+
+#       - name: Add SSH private key
+#         run: |
+#           mkdir -p ~/.ssh
+#           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/my-key.pem
+#           chmod 600 ~/.ssh/my-key.pem
+
+#       - name: Copy source-repo to EC2
+#         run: |
+#           scp -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem -r source-repo ec2-user@${{ env.PUBLIC_IP }}:/home/ec2-user/source-repo
+#           scp -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem -r infra-repo ec2-user@${{ env.PUBLIC_IP }}:/home/ec2-user/infra-repo
+
+#       - name: Install Docker, setup environment variables, build an image, instantiate containers, and run containers
+#         run: |
+#           ssh -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+#             sudo yum update -y
+#             sudo yum install -y docker
+#             sudo service docker start
+#             sudo usermod -a -G docker ec2-user
+#             echo "Docker installed successfully!"
+#             sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+#             sudo chmod +x /usr/local/bin/docker-compose
+#             docker-compose --version
+#             export RDS_HOST=${{ secrets.RDS_HOST }}
+#             export RDS_USER=${{ secrets.RDS_USER }}
+#             export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
+#             export RDS_NAME=${{ secrets.RDS_NAME }}
+#             export RDS_PORT=${{ secrets.RDS_PORT }}
+#             cd /home/ec2-user/infra-repo
+#             docker-compose -f docker-compose.prod.yml up --build -d
+#           EOF
+
+#       - name: Initialize RDS MySQL
+#         run: |
+#           ssh -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+#             sudo yum update -y
+#             sudo yum install -y mariadb105
+#             echo "MySQL client installed."
+          
+#             mysql -h ${{ secrets.RDS_HOST }} \
+#             -u ${{ secrets.RDS_USER }} \
+#             -p${{ secrets.RDS_PASSWORD }} \
+#             -P ${{ secrets.RDS_PORT }} \
+#             -e "CREATE DATABASE IF NOT EXISTS ${{ secrets.RDS_NAME }};"
+
+#             echo "Database created."
+#             mysql -h ${{ secrets.RDS_HOST }} \
+#                   -u ${{ secrets.RDS_USER }} \
+#                   -p${{ secrets.RDS_PASSWORD }} \
+#                   -P ${{ secrets.RDS_PORT }} \
+#                   ${{ secrets.RDS_NAME }} < ~/source-repo/database/init.sql
+
+#             echo "Database initialized successfully."
+#           EOF
+
+#       - name: Run smoke tests
+#         run: |
+#           ssh -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+#             echo "Running smoke tests..."
+#             cd /home/ec2-user/source-repo
+          
+#             chmod +x frontend/tests/homepage.test.sh
+#             ./frontend/tests/homepage.test.sh
+#             if [ $? -ne 0 ]; then
+#               echo "Frontend test failed!"
+#               exit 1
+#             fi
+#             echo "Frontend test passed!"
+
+#             # Run API test
+#             chmod +x backend/tests/api.test.sh
+#             ./backend/tests/api.test.sh
+#             if [ $? -ne 0 ]; then
+#               echo "Backend test failed!"
+#               exit 1
+#             fi
+#             echo "Backend test passed!"
+#           EOF
+
+#       - name: Build and push Docker image to ECR
+#         if: success()
+#         run: |
+#           ssh -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+#             echo "Logging in to AWS ECR.."
+#             export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+#             export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#             export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
+#             aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URL }}
+
+#             echo "Tagging image.."
+#             cd /home/ec2-user/infra-repo
+#             docker tag infra-repo-backend:latest ${{ secrets.AWS_ECR_REPO }}:backend-latest
+#             docker tag infra-repo-frontend:latest ${{ secrets.AWS_ECR_REPO }}:frontend-latest
+          
+#             echo "Pushing the images to ECR.."
+#             docker push ${{ secrets.AWS_ECR_REPO }}:backend-latest
+#             docker push ${{ secrets.AWS_ECR_REPO }}:frontend-latest
+            
+#             echo "Docker images pushed to ECR successfully!"
+#           EOF
