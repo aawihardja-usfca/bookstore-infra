@@ -14,8 +14,9 @@ Parameters:
 
   SecurityGroup:
     Description: Security Group ID for the instance
-    Type: AWS::EC2::SecurityGroup::Id
-    Default: sg-01f7f4b93d2a0f127 # BookstoreSecurityGroup
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Default: sg-01f7f4b93d2a0f127,sg-07486764dc18ccdcc
+    # BookstoreSecurityGroup (Allow SSH), ec2-rds (Allow outbond from EC2 to RDS)
 
   AMI:
     Description: Amazon Machine Image (AMI) ID
@@ -28,8 +29,7 @@ Resources:
     Properties:
       InstanceType: !Ref InstanceType
       KeyName: !Ref KeyName
-      SecurityGroupIds:
-        - !Ref SecurityGroup
+      SecurityGroupIds: !Ref SecurityGroup
       ImageId: !Ref AMI
       Tags:
         - Key: Name

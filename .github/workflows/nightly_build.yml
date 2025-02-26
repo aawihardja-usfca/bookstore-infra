@@ -15,7 +15,7 @@ jobs:
       SSH_FILE_NAME: test-ec2-instance
       AWS_REGION: us-east-1
       AWS_ID: '035863456454'
-
+      DB_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
 
     steps:
       - name: Checkout source repo
@@ -45,6 +45,11 @@ jobs:
           --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
           --capabilities CAPABILITY_NAMED_IAM
 
+      - name: Describe CloudFormation stack events
+        if: failure()  # This step will run only if the previous step fails.
+        run: |
+          aws cloudformation describe-stack-events --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
+
       - name: Wait for EC2 instance to be ready
         run: sleep 30
 
@@ -66,11 +71,6 @@ jobs:
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.SOURCE_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.SOURCE_REPO_PATH }}
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.INFRA_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.INFRA_REPO_PATH }}
 
-      - name: Test Docker installation
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-          docker --version
-
       - name: Install Docker, setup environment variables, build an image, instantiate containers, and run containers
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
@@ -89,32 +89,25 @@ jobs:
             cd ~/${{ env.INFRA_REPO_PATH }}
             docker-compose -f compose-test.yml up --build -d
           EOF
-
-      - name: Delete the Temp EC2 stack
-        run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
       
-      # - name: Initialize RDS MySQL
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-      #       sudo yum update -y
-      #       sudo yum install -y mariadb105
-      #       echo "MySQL client installed."
+      - name: Initialize RDS MySQL
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+            sudo yum update -y
+            sudo yum install -y mariadb105
+            echo "MySQL client installed."
           
-      #       mysql -h ${{ secrets.RDS_HOST }} \
-      #       -u ${{ secrets.RDS_USER }} \
-      #       -p${{ secrets.RDS_PASSWORD }} \
-      #       -P ${{ secrets.RDS_PORT }} \
-      #       -e "CREATE DATABASE IF NOT EXISTS ${{ secrets.RDS_NAME }};"
+            mysql -h ${{ env.DB_HOST }} \
+            -u admin \
+            -ppassword \
+            -P 3306 \
+            -e "CREATE DATABASE IF NOT EXISTS test_db;"
 
-      #       echo "Database created."
-      #       mysql -h ${{ secrets.RDS_HOST }} \
-      #             -u ${{ secrets.RDS_USER }} \
-      #             -p${{ secrets.RDS_PASSWORD }} \
-      #             -P ${{ secrets.RDS_PORT }} \
-      #             ${{ secrets.RDS_NAME }} < ~/source-repo/database/init.sql
+            echo "Database initialized successfully."
+          EOF
 
-      #       echo "Database initialized successfully."
-      #     EOF
+      # - name: Delete the Temp EC2 stack
+      #   run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
 
       # - name: Login to AWS ECR
       #   id: login-ecr
