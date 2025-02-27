@@ -16,7 +16,7 @@ jobs:
       AWS_REGION: us-east-1
       AWS_ID: '035863456454'
       RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
-      TEST_DB: test_db
+      DB_NAME: test_db
 
     steps:
       - name: Checkout source repo
@@ -47,7 +47,7 @@ jobs:
           --capabilities CAPABILITY_NAMED_IAM
 
       - name: Describe CloudFormation stack events
-        if: failure()  # This step will run only if the previous step fails.
+        if: failure()
         run: |
           aws cloudformation describe-stack-events --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
 
@@ -86,7 +86,7 @@ jobs:
             export RDS_HOST=${{ env.RDS_HOST }}
             export RDS_USER=${{ secrets.RDS_USER }}
             export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
-            export DB_NAME=${{ env.TEST_DB }}
+            export DB_NAME=${{ env.DB_NAME }}
             cd ~/${{ env.INFRA_REPO_PATH }}
             docker-compose -f compose-test.yml up --build -d
           EOF
@@ -96,47 +96,79 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
             sudo yum update -y
             sudo yum install -y mariadb105
-            echo "MySQL client installed."
+            echo "MySQL client installed"
           
             mysql -h ${{ env.RDS_HOST }} \
             -u ${{ secrets.RDS_USER }} \
             -p${{ secrets.RDS_PASSWORD }} \
             -P 3306 \
-            -e "CREATE DATABASE IF NOT EXISTS ${{ env.TEST_DB }};"
+            -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};
+                USE ${{ env.DB_NAME }};
+                CREATE TABLE IF NOT EXISTS books (
+                  id INT AUTO_INCREMENT PRIMARY KEY,
+                  title VARCHAR(100) NOT NULL,
+                  description TEXT NOT NULL,
+                  cover TEXT NULL,
+                  price INT NOT NULL
+                );"
 
-            echo "Database initialized successfully."
+            echo "Test DB initialized"
           EOF
 
-      # - name: Delete the Temp EC2 stack
-      #   run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
-
-      # - name: Run smoke tests
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-      #       echo "Running smoke tests..."
-      #       cd ~/${{ env.SOURCE_REPO_PATH }}
+      - name: Run smoke tests
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+            echo "Running smoke tests..."
+            cd ~/${{ env.SOURCE_REPO_PATH }}
           
-      #       chmod +x frontend/tests/homepage.test.sh
-      #       ./frontend/tests/homepage.test.sh
-      #       if [ $? -ne 0 ]; then
-      #         echo "Frontend test failed!"
-      #         exit 1
-      #       fi
-      #       echo "Frontend test passed!"
+            chmod +x frontend/tests/test.sh
+            ./frontend/tests/test.sh
+            if [ $? -ne 0 ]; then
+              echo "Frontend test failed!"
+              exit 1
+            fi
+            echo "Frontend test passed!"
+          
+            chmod +x backend/tests/test.sh
+            ./backend/tests/test.sh
+            if [ $? -ne 0 ]; then
+              echo "Backend test failed!"
+              exit 1
+            fi
+            echo "Backend test passed!"
+          EOF
+      
+      - name: Remove test db
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+            
+            mysql -h ${{ env.RDS_HOST }} \
+            -u ${{ secrets.RDS_USER }} \
+            -p${{ secrets.RDS_PASSWORD }} \
+            -P 3306 \
+            -e "DROP DATABASE ${{ env.DB_NAME }};"
+          EOF
 
-      #       # Run API test
-      #       chmod +x backend/tests/api.test.sh
-      #       ./backend/tests/api.test.sh
-      #       if [ $? -ne 0 ]; then
-      #         echo "Backend test failed!"
-      #         exit 1
-      #       fi
-      #       echo "Backend test passed!"
-      #     EOF
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
 
-      # - name: Login to AWS ECR
-      #   id: login-ecr
-      #   uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Test
+        run: |
+          echo ${{ steps.login-ecr.outputs.registry }}
+
+      - name: Delete the Temp EC2 stack
+        run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
+
+
 
       # - name: Build and push Docker image to ECR
       #   if: success()
@@ -273,28 +305,24 @@ jobs:
 #             docker-compose -f docker-compose.prod.yml up --build -d
 #           EOF
 
-#       - name: Initialize RDS MySQL
-#         run: |
-#           ssh -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-#             sudo yum update -y
-#             sudo yum install -y mariadb105
-#             echo "MySQL client installed."
+      # - name: Initialize RDS MySQL
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/my-key.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       sudo yum update -y
+      #       sudo yum install -y mariadb105
+      #       echo "MySQL client installed."
           
-#             mysql -h ${{ secrets.RDS_HOST }} \
-#             -u ${{ secrets.RDS_USER }} \
-#             -p${{ secrets.RDS_PASSWORD }} \
-#             -P ${{ secrets.RDS_PORT }} \
-#             -e "CREATE DATABASE IF NOT EXISTS ${{ secrets.RDS_NAME }};"
+      #       mysql -h ${{ secrets.RDS_HOST }} \
+      #       -u ${{ secrets.RDS_USER }} \
+      #       -p${{ secrets.RDS_PASSWORD }} \
+      #       -P ${{ secrets.RDS_PORT }} \
+      #       -e "CREATE DATABASE IF NOT EXISTS ${{ secrets.RDS_NAME }};"
 
-#             echo "Database created."
-#             mysql -h ${{ secrets.RDS_HOST }} \
-#                   -u ${{ secrets.RDS_USER }} \
-#                   -p${{ secrets.RDS_PASSWORD }} \
-#                   -P ${{ secrets.RDS_PORT }} \
-#                   ${{ secrets.RDS_NAME }} < ~/source-repo/database/init.sql
+      #       echo "Database created."
 
-#             echo "Database initialized successfully."
-#           EOF
+
+      #       echo "Database initialized successfully."
+      #     EOF
 
 #       - name: Run smoke tests
 #         run: |

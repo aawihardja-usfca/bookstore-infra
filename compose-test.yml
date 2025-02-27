@@ -9,8 +9,8 @@ services:
       RDS_HOST: ${RDS_HOST}
       RDS_USER: ${RDS_USER}
       RDS_PASSWORD: ${RDS_PASSWORD}
-      DB_NAME: ${RDS_NAME}
-      DB_PORT: ${RDS_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_PORT: 3306
 
   frontend:
     build:
