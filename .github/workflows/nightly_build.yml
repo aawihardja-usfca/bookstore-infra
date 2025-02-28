@@ -20,8 +20,13 @@ jobs:
       QA_DB: qa_db
       COMPOSE_QA_FILENAME: compose-qa
       QA_EC2_NAME: QA Bookstore
+      TEMP_EC2_NAME: TEMP Bookstore
+      TEMP_IMG_TAG: temp
+      ECR_BACKEND_REPO: bookstore-backend
+      ECR_FRONTEND_REPO: bookstore-frontend
 
     steps:
+      # 1. Checkout code
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
@@ -33,129 +38,13 @@ jobs:
         with:
           repository: aawihardja-usfca/bookstore-infra
           path: ${{ env.INFRA_REPO_PATH }}
+          ref: test
 
-      - name: configure AWS credentials
+      # 2. Configure AWS
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-
-      - name: Launch TempEC2
-        run: |
-          aws cloudformation deploy \
-          --template-file ${{ env.INFRA_REPO_PATH }}/cloudformation/ec2-instance.yml \
-          --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
-          --capabilities CAPABILITY_NAMED_IAM
-
-      - name: Describe CloudFormation stack events
-        if: failure()
-        run: |
-          aws cloudformation describe-stack-events --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
-
-      - name: Wait for EC2 instance to be ready
-        run: sleep 30
-
-      - name: Get EC2 public IP
-        id: get-ip
-        run: |
-          PUBLIC_IP=$(aws cloudformation describe-stacks --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='PublicIp'].OutputValue" --output text)
-          echo "PUBLIC_IP=${PUBLIC_IP}" >> $GITHUB_ENV
-
-      - name: Add SSH private key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
-          chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
-
-      - name: Copy source-repo to EC2
-        run: |
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.SOURCE_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.SOURCE_REPO_PATH }}
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.INFRA_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.INFRA_REPO_PATH }}
-
-      - name: Install Docker, setup environment variables, build an image, instantiate containers, and run containers
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-            sudo yum update -y
-            sudo yum install -y docker
-            sudo service docker start
-            sudo usermod -aG docker ec2-user
-            echo "Docker installed successfully!"
-            sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-            sudo chmod +x /usr/local/bin/docker-compose
-            docker-compose --version
-            export RDS_HOST=${{ env.RDS_HOST }}
-            export RDS_USER=${{ secrets.RDS_USER }}
-            export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
-            export DB_NAME=${{ env.DB_NAME }}
-            cd ~/${{ env.INFRA_REPO_PATH }}
-            docker-compose -f compose-test.yml up --build -d
-          EOF
-      
-      - name: Initialize RDS MySQL
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-            sudo yum update -y
-            sudo yum install -y mariadb105
-            echo "MySQL client installed"
-          
-            mysql -h ${{ env.RDS_HOST }} \
-            -u ${{ secrets.RDS_USER }} \
-            -p${{ secrets.RDS_PASSWORD }} \
-            -P 3306 \
-            -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};
-                USE ${{ env.DB_NAME }};
-                CREATE TABLE IF NOT EXISTS books (
-                  id INT AUTO_INCREMENT PRIMARY KEY,
-                  title VARCHAR(100) NOT NULL,
-                  description TEXT NOT NULL,
-                  cover TEXT NULL,
-                  price INT NOT NULL
-                );"
-
-            echo "Test DB initialized"
-          EOF
-
-      - name: Run smoke tests
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-            echo "Running smoke tests..."
-            cd ~/${{ env.SOURCE_REPO_PATH }}
-          
-            chmod +x frontend/tests/test.sh
-            ./frontend/tests/test.sh
-            if [ $? -ne 0 ]; then
-              echo "Frontend test failed!"
-              exit 1
-            fi
-            echo "Frontend test passed!"
-          
-            chmod +x backend/tests/test.sh
-            ./backend/tests/test.sh
-            if [ $? -ne 0 ]; then
-              echo "Backend test failed!"
-              exit 1
-            fi
-            echo "Backend test passed!"
-          EOF
-      
-      - name: Remove test db
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-            
-            mysql -h ${{ env.RDS_HOST }} \
-            -u ${{ secrets.RDS_USER }} \
-            -p${{ secrets.RDS_PASSWORD }} \
-            -P 3306 \
-            -e "DROP DATABASE ${{ env.DB_NAME }};"
-          EOF
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
@@ -164,92 +53,232 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set IMAGE_TAG
-        run: echo "IMAGE_TAG=$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
-
+      # 3. Build Docker images
       - name: Build Docker images
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          BACKEND_REPOSITORY: bookstore-backend
-          FRONTEND_REPOSITORY: bookstore-frontend
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << EOF
-            docker build -t $ECR_REGISTRY/$BACKEND_REPOSITORY:latest -t $ECR_REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG ./${{ env.SOURCE_REPO_PATH }}/backend
-            docker build -t $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest -t $ECR_REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG ./${{ env.SOURCE_REPO_PATH }}/frontend
-            docker images
+        run : |
+          docker build -t $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:${{ env.TEMP_IMG_TAG }} ./${{ env.SOURCE_REPO_PATH }}/backend
+          docker build -t $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:${{ env.TEMP_IMG_TAG }} ./${{ env.SOURCE_REPO_PATH }}/frontend
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
-            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
-
-            docker push $ECR_REGISTRY/$BACKEND_REPOSITORY:latest
-            docker push $ECR_REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG
-            docker push $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest
-            docker push $ECR_REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG
-          EOF
-      
-      - name: Delete the Temp EC2 stack
-        run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
-
-      # Maybe move this to another workflow
-      - name: Get QA EC2 ip address
-        id: get-qa-ip
-        run: |
-          QA_IP=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=${{ env.QA_EC2_NAME }}" \
-          --query "Reservations[*].Instances[*].[PublicIpAddress]" \
-          --output text)
-          echo "qa-ip=$QA_IP" >> $GITHUB_OUTPUT
-
-      - name: Copy compose-qa.yml to QA EC2
-        run: |
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/${{ env.COMPOSE_QA_FILENAME }}.yml ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/nginx.conf ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
-
-      - name: Initialize QA database
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << 'EOF'
-            sudo yum update -y
-            sudo yum install -y mariadb105
-
-            mysql -h ${{ env.RDS_HOST }} \
-            -u ${{ secrets.RDS_USER }} \
-            -p${{ secrets.RDS_PASSWORD }} \
-            -P 3306 \
-            -e "CREATE DATABASE IF NOT EXISTS ${{ env.QA_DB }};
-                USE ${{ env.QA_DB }};
-
-                CREATE TABLE IF NOT EXISTS books (
-                  id INT AUTO_INCREMENT PRIMARY KEY,
-                  title VARCHAR(100) NOT NULL,
-                  description TEXT NOT NULL,
-                  cover TEXT NULL,
-                  price INT NOT NULL
-                );"
-
-            echo "QA DB initialized"
-          EOF
-      
-      - name: SSH into QA EC2
+      # 4. Push images to ECR
+      - name: Push Docker images
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          BACKEND_REPOSITORY: bookstore-backend
-          FRONTEND_REPOSITORY: bookstore-frontend
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << EOF
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
-            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          docker push $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:${{ env.TEMP_IMG_TAG }}
+          docker push $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:${{ env.TEMP_IMG_TAG }}
 
-            docker pull $ECR_REGISTRY/$BACKEND_REPOSITORY:latest
-            docker pull $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest
+      # 5. Spin up a temporary EC2 & Wait until it is running
+      - name: Launch TempEC2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id ami-05b10e08d247fb927 \
+          --instance-type t2.micro \
+          --key-name test-ec2-instance \
+          --security-group-ids sg-01f7f4b93d2a0f127 sg-07486764dc18ccdcc \
+          --user-data file://${{ env.INFRA_REPO_PATH }}/userdata.sh \
+          --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TEMP_EC2_NAME }}}]' \
+          --query "Instances[0].InstanceId" \
+          --output text)
 
-            export RDS_HOST=${{ env.RDS_HOST }}
-            export RDS_USER=${{ secrets.RDS_USER }}
-            export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
-            export DB_NAME=${{ env.QA_DB }}
-            docker-compose -f ${{ env.COMPOSE_QA_FILENAME }}.yml up -d
-          EOF
+          aws ec2 wait instance-running --instance-ids ${INSTANCE_ID}
+
+          TEMP_EC2_IP=$(aws ec2 describe-instances \
+          --instance-ids ${INSTANCE_ID} \
+          --query "Reservations[0].Instances[0].PublicIpAddress" \
+          --output text)
+
+          echo "TEMP_EC2_IP=${TEMP_EC2_IP}" >> $GITHUB_ENV
+          echo "Instance ${INSTANCE_ID} is now running!"
+      
+      - name: Use the IP address
+        run: echo "TEMP EC2 IP=${{ env.TEMP_EC2_IP }}"
+
+      # - name: Wait for EC2 instance to be ready
+      #   run: sleep 30
+
+      # - name: Get EC2 public IP
+      #   id: get-ip
+      #   run: |
+      #     PUBLIC_IP=$(aws cloudformation describe-stacks --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
+      #       --query "Stacks[0].Outputs[?OutputKey=='PublicIp'].OutputValue" --output text)
+      #     echo "PUBLIC_IP=${PUBLIC_IP}" >> $GITHUB_ENV
+
+      # - name: Add SSH private key
+      #   run: |
+      #     mkdir -p ~/.ssh
+      #     echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+      #     chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+
+      # - name: Copy source-repo to EC2
+      #   run: |
+      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.SOURCE_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.SOURCE_REPO_PATH }}
+      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.INFRA_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.INFRA_REPO_PATH }}
+
+      # - name: Install Docker, setup environment variables, build an image, instantiate containers, and run containers
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       sudo yum update -y
+      #       sudo yum install -y docker
+      #       sudo service docker start
+      #       sudo usermod -aG docker ec2-user
+      #       echo "Docker installed successfully!"
+      #       sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      #       sudo chmod +x /usr/local/bin/docker-compose
+      #       docker-compose --version
+      #       export RDS_HOST=${{ env.RDS_HOST }}
+      #       export RDS_USER=${{ secrets.RDS_USER }}
+      #       export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
+      #       export DB_NAME=${{ env.DB_NAME }}
+      #       cd ~/${{ env.INFRA_REPO_PATH }}
+      #       docker-compose -f compose-test.yml up --build -d
+      #     EOF
+      
+      # - name: Initialize RDS MySQL
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       sudo yum update -y
+      #       sudo yum install -y mariadb105
+      #       echo "MySQL client installed"
+          
+      #       mysql -h ${{ env.RDS_HOST }} \
+      #       -u ${{ secrets.RDS_USER }} \
+      #       -p${{ secrets.RDS_PASSWORD }} \
+      #       -P 3306 \
+      #       -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};
+      #           USE ${{ env.DB_NAME }};
+      #           CREATE TABLE IF NOT EXISTS books (
+      #             id INT AUTO_INCREMENT PRIMARY KEY,
+      #             title VARCHAR(100) NOT NULL,
+      #             description TEXT NOT NULL,
+      #             cover TEXT NULL,
+      #             price INT NOT NULL
+      #           );"
+
+      #       echo "Test DB initialized"
+      #     EOF
+
+      # - name: Run smoke tests
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+      #       echo "Running smoke tests..."
+      #       cd ~/${{ env.SOURCE_REPO_PATH }}
+          
+      #       chmod +x frontend/tests/test.sh
+      #       ./frontend/tests/test.sh
+      #       if [ $? -ne 0 ]; then
+      #         echo "Frontend test failed!"
+      #         exit 1
+      #       fi
+      #       echo "Frontend test passed!"
+          
+      #       chmod +x backend/tests/test.sh
+      #       ./backend/tests/test.sh
+      #       if [ $? -ne 0 ]; then
+      #         echo "Backend test failed!"
+      #         exit 1
+      #       fi
+      #       echo "Backend test passed!"
+      #     EOF
+      
+      # - name: Remove test db
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
+            
+      #       mysql -h ${{ env.RDS_HOST }} \
+      #       -u ${{ secrets.RDS_USER }} \
+      #       -p${{ secrets.RDS_PASSWORD }} \
+      #       -P 3306 \
+      #       -e "DROP DATABASE ${{ env.DB_NAME }};"
+      #     EOF
+
+      # - name: Set IMAGE_TAG
+      #   run: echo "IMAGE_TAG=$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
+
+      # - name: Build Docker images
+      #   env:
+      #     ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      #     BACKEND_REPOSITORY: bookstore-backend
+      #     FRONTEND_REPOSITORY: bookstore-frontend
+      #     IMAGE_TAG: ${{ env.IMAGE_TAG }}
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << EOF
+      #       docker build -t $ECR_REGISTRY/$BACKEND_REPOSITORY:latest -t $ECR_REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG ./${{ env.SOURCE_REPO_PATH }}/backend
+      #       docker build -t $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest -t $ECR_REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG ./${{ env.SOURCE_REPO_PATH }}/frontend
+
+      #       export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+      #       export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #       export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
+      #       aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      #       docker push $ECR_REGISTRY/$BACKEND_REPOSITORY:latest
+      #       docker push $ECR_REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG
+      #       docker push $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest
+      #       docker push $ECR_REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG
+      #     EOF
+      
+      # - name: Delete the Temp EC2 stack
+      #   run: aws cloudformation delete-stack --stack-name ${{ env.TEMP_EC2_STACK_NAME }}
+
+      # # Maybe move this to another workflow
+      # - name: Get QA EC2 ip address
+      #   id: get-qa-ip
+      #   run: |
+      #     QA_IP=$(aws ec2 describe-instances \
+      #     --filters "Name=tag:Name,Values=${{ env.QA_EC2_NAME }}" \
+      #     --query "Reservations[*].Instances[*].[PublicIpAddress]" \
+      #     --output text)
+      #     echo "qa-ip=$QA_IP" >> $GITHUB_OUTPUT
+
+      # - name: Copy compose-qa.yml to QA EC2
+      #   run: |
+      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/${{ env.COMPOSE_QA_FILENAME }}.yml ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
+      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/nginx.conf ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
+
+      # - name: Initialize QA database
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << 'EOF'
+      #       sudo yum update -y
+      #       sudo yum install -y mariadb105
+
+      #       mysql -h ${{ env.RDS_HOST }} \
+      #       -u ${{ secrets.RDS_USER }} \
+      #       -p${{ secrets.RDS_PASSWORD }} \
+      #       -P 3306 \
+      #       -e "CREATE DATABASE IF NOT EXISTS ${{ env.QA_DB }};
+      #           USE ${{ env.QA_DB }};
+
+      #           CREATE TABLE IF NOT EXISTS books (
+      #             id INT AUTO_INCREMENT PRIMARY KEY,
+      #             title VARCHAR(100) NOT NULL,
+      #             description TEXT NOT NULL,
+      #             cover TEXT NULL,
+      #             price INT NOT NULL
+      #           );"
+
+      #       echo "QA DB initialized"
+      #     EOF
+      
+      # - name: SSH into QA EC2
+      #   env:
+      #     ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      #     BACKEND_REPOSITORY: bookstore-backend
+      #     FRONTEND_REPOSITORY: bookstore-frontend
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << EOF
+      #       export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+      #       export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #       export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
+      #       aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      #       docker pull $ECR_REGISTRY/$BACKEND_REPOSITORY:latest
+      #       docker pull $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest
+
+      #       export RDS_HOST=${{ env.RDS_HOST }}
+      #       export RDS_USER=${{ secrets.RDS_USER }}
+      #       export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
+      #       export DB_NAME=${{ env.QA_DB }}
+      #       docker-compose -f ${{ env.COMPOSE_QA_FILENAME }}.yml up -d
+      #     EOF
