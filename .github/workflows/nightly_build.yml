@@ -165,7 +165,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set IMAGE_TAG
-        run: echo "IMAGE_TAG=$(date +'%Y%m%d')" >> $GITHUB_ENV
+        run: echo "IMAGE_TAG=$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
 
       - name: Build Docker images
         env:
@@ -206,7 +206,8 @@ jobs:
       - name: Copy compose-qa.yml to QA EC2
         run: |
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/${{ env.COMPOSE_QA_FILENAME }}.yml ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
-      
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/nginx.conf ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
+
       - name: Initialize QA database
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << 'EOF'
@@ -218,7 +219,8 @@ jobs:
             -p${{ secrets.RDS_PASSWORD }} \
             -P 3306 \
             -e "CREATE DATABASE IF NOT EXISTS ${{ env.QA_DB }};
-                USE ${{ env.DB_NAME }};
+                USE ${{ env.QA_DB }};
+
                 CREATE TABLE IF NOT EXISTS books (
                   id INT AUTO_INCREMENT PRIMARY KEY,
                   title VARCHAR(100) NOT NULL,
