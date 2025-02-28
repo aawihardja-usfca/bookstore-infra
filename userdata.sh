@@ -20,3 +20,6 @@ sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-
 
 # Make Docker Compose executable
 sudo chmod +x /usr/local/bin/docker-compose
+
+# Install MySQL CLI
+sudo dnf install -y mariadb105

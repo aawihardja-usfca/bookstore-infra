@@ -16,8 +16,8 @@ jobs:
       AWS_REGION: us-east-1
       AWS_ID: '035863456454'
       RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
-      DB_NAME: test_db
-      QA_DB: qa_db
+      TEST_DB_NAME: test_db
+      QA_DB_NAME: qa_db
       COMPOSE_QA_FILENAME: compose-qa
       QA_EC2_NAME: QA Bookstore
       TEMP_EC2_NAME: TEMP Bookstore
@@ -96,21 +96,50 @@ jobs:
       - name: Use the IP address
         run: echo "TEMP EC2 IP=${{ env.TEMP_EC2_IP }}"
 
-      # - name: Wait for EC2 instance to be ready
-      #   run: sleep 30
+      - name: Copy SSH private key to Github env
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+          chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
 
-      # - name: Get EC2 public IP
-      #   id: get-ip
-      #   run: |
-      #     PUBLIC_IP=$(aws cloudformation describe-stacks --stack-name ${{ env.TEMP_EC2_STACK_NAME }} \
-      #       --query "Stacks[0].Outputs[?OutputKey=='PublicIp'].OutputValue" --output text)
-      #     echo "PUBLIC_IP=${PUBLIC_IP}" >> $GITHUB_ENV
+      - name: Wait for SSH
+        run: |
+          max_attempts=10
+          attempt=0
+          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} 'echo "SSH ready"'; do
+            attempt=$((attempt+1))
+            if [ $attempt -eq $max_attempts ]; then
+              echo "SSH is not available after $max_attempts attempts. Exiting."
+              exit 1
+            fi
+            echo "SSH not ready, retrying in 10 seconds... (attempt $attempt)"
+            sleep 10
+          done
+      
+      # 6. Init RDS for testing
+      - name: Prepare SQL init file
+        run: |
+          sed "s|DB_NAME|${{ env.TEST_DB_NAME }}|g" ${INFRA_REPO_PATH}/init.sql.template > ${INFRA_REPO_PATH}/init.sql
+          cat ${INFRA_REPO_PATH}/init.sql.template
 
-      # - name: Add SSH private key
-      #   run: |
-      #     mkdir -p ~/.ssh
-      #     echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
-      #     chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+      - name: Copy SQL init file to Temp EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
+          ${INFRA_REPO_PATH}/init.sql ec2-user@${{ env.TEMP_EC2_IP }}:~/init.sql
+
+      - name: Initialize RDS on Temp EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << 'EOF'
+            sudo dnf install -y mariadb105
+            mysql -h ${{ env.RDS_HOST }} \
+              -u ${{ secrets.RDS_USER }} \
+              -p${{ secrets.RDS_PASSWORD }} \
+              -P 3306 < ~/init.sql
+          EOF
+
+      # 7. Pull build images from ECR
+      # 8. Run integration tests
+      # 9. If tests passed, retag the images, otherwise delete them
 
       # - name: Copy source-repo to EC2
       #   run: |
@@ -143,19 +172,19 @@ jobs:
       #       sudo yum install -y mariadb105
       #       echo "MySQL client installed"
           
-      #       mysql -h ${{ env.RDS_HOST }} \
-      #       -u ${{ secrets.RDS_USER }} \
-      #       -p${{ secrets.RDS_PASSWORD }} \
-      #       -P 3306 \
-      #       -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};
-      #           USE ${{ env.DB_NAME }};
-      #           CREATE TABLE IF NOT EXISTS books (
-      #             id INT AUTO_INCREMENT PRIMARY KEY,
-      #             title VARCHAR(100) NOT NULL,
-      #             description TEXT NOT NULL,
-      #             cover TEXT NULL,
-      #             price INT NOT NULL
-      #           );"
+            # mysql -h ${{ env.RDS_HOST }} \
+            # -u ${{ secrets.RDS_USER }} \
+            # -p${{ secrets.RDS_PASSWORD }} \
+            # -P 3306 \
+            # -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};
+            #     USE ${{ env.DB_NAME }};
+            #     CREATE TABLE IF NOT EXISTS books (
+            #       id INT AUTO_INCREMENT PRIMARY KEY,
+            #       title VARCHAR(100) NOT NULL,
+            #       description TEXT NOT NULL,
+            #       cover TEXT NULL,
+            #       price INT NOT NULL
+            #     );"
 
       #       echo "Test DB initialized"
       #     EOF
