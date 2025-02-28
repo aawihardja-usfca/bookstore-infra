@@ -1,7 +1,6 @@
 services:
   backend:
-    build:
-      context: ../source-repo/backend
+    image: 035863456454.dkr.ecr.us-east-1.amazonaws.com/bookstore-backend:latest
     ports:
       - "8800:8800"
     environment:
@@ -9,11 +8,10 @@ services:
       RDS_USER: ${RDS_USER}
       RDS_PASSWORD: ${RDS_PASSWORD}
       DB_NAME: ${DB_NAME}
-      DB_PORT: 3306
+      # DB_PORT: 3306
 
   frontend:
-    build:
-      context: ../source-repo/frontend
+    image: 035863456454.dkr.ecr.us-east-1.amazonaws.com/bookstore-frontend:latest
     ports:
       - "5173:5173"
     depends_on:
