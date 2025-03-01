@@ -211,54 +211,23 @@ jobs:
 
 
       # 9. If tests passed, retag the images, otherwise delete them
+      - name: Retag Docker images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run : |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
-      # - name: Copy source-repo to EC2
-      #   run: |
-      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.SOURCE_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.SOURCE_REPO_PATH }}
-      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem -r ${{ env.INFRA_REPO_PATH }} ec2-user@${{ env.PUBLIC_IP }}:~/${{ env.INFRA_REPO_PATH }}
+          TIMESTAMP=$(date +'%Y%m%d%H%M')
+          docker tag $ECR_REGISTRY/$ECR_BACKEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_BACKEND_REPO:latest
+          docker tag $ECR_REGISTRY/$ECR_BACKEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_BACKEND_REPO:$TIMESTAMP
+          docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_FRONTEND_REPO:latest
+          docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_FRONTEND_REPO:$TIMESTAMP
 
-      # - name: Install Docker, setup environment variables, build an image, instantiate containers, and run containers
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-      #       sudo yum update -y
-      #       sudo yum install -y docker
-      #       sudo service docker start
-      #       sudo usermod -aG docker ec2-user
-      #       echo "Docker installed successfully!"
-      #       sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-      #       sudo chmod +x /usr/local/bin/docker-compose
-      #       docker-compose --version
-      #       export RDS_HOST=${{ env.RDS_HOST }}
-      #       export RDS_USER=${{ secrets.RDS_USER }}
-      #       export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
-      #       export DB_NAME=${{ env.DB_NAME }}
-      #       cd ~/${{ env.INFRA_REPO_PATH }}
-      #       docker-compose -f compose-test.yml up --build -d
-      #     EOF
-      
-      # - name: Initialize RDS MySQL
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-      #       sudo yum update -y
-      #       sudo yum install -y mariadb105
-      #       echo "MySQL client installed"
-          
-            # mysql -h ${{ env.RDS_HOST }} \
-            # -u ${{ secrets.RDS_USER }} \
-            # -p${{ secrets.RDS_PASSWORD }} \
-            # -P 3306 \
-            # -e "CREATE DATABASE IF NOT EXISTS ${{ env.DB_NAME }};
-            #     USE ${{ env.DB_NAME }};
-            #     CREATE TABLE IF NOT EXISTS books (
-            #       id INT AUTO_INCREMENT PRIMARY KEY,
-            #       title VARCHAR(100) NOT NULL,
-            #       description TEXT NOT NULL,
-            #       cover TEXT NULL,
-            #       price INT NOT NULL
-            #     );"
+          docker push $ECR_REGISTRY/$ECR_BACKEND_REPO:latest
+          docker push $ECR_REGISTRY/$ECR_BACKEND_REPO:$TIMESTAMP
+          docker push $ECR_REGISTRY/$ECR_FRONTEND_REPO:latest
+          docker push $ECR_REGISTRY/$ECR_FRONTEND_REPO:$TIMESTAMP
 
-      #       echo "Test DB initialized"
-      #     EOF
 
       # - name: Run smoke tests
       #   run: |
