@@ -1,7 +1,6 @@
 services:
   backend:
-    build:
-      context: ../source-repo/backend
+    image: ${ECR_REGISTRY}/${ECR_BACKEND_REPO}:${IMAGE_TAG}
     ports:
       - "8800:8800"
     environment:
@@ -11,8 +10,7 @@ services:
       DB_NAME: ${DB_NAME}
 
   frontend:
-    build:
-      context: ../source-repo/frontend
+    image: ${ECR_REGISTRY}/${ECR_FRONTEND_REPO}:${IMAGE_TAG}
     ports:
       - "5173:5173"
     depends_on:

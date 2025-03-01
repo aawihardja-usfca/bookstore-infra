@@ -11,14 +11,14 @@ jobs:
     env:
       SOURCE_REPO_PATH: source-repo
       INFRA_REPO_PATH: infra-repo
-      TEMP_EC2_STACK_NAME: temp-ec2-stack
       SSH_FILE_NAME: test-ec2-instance
       AWS_REGION: us-east-1
       AWS_ID: '035863456454'
       RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
       TEST_DB_NAME: test_db
       QA_DB_NAME: qa_db
-      COMPOSE_QA_FILENAME: compose-qa
+      COMPOSE_TEST_FILE: compose-test
+      COMPOSE_QA_FILE: compose-qa
       QA_EC2_NAME: QA Bookstore
       TEMP_EC2_NAME: TEMP Bookstore
       TEMP_IMG_TAG: temp
@@ -85,12 +85,13 @@ jobs:
 
           aws ec2 wait instance-running --instance-ids ${INSTANCE_ID}
 
-          TEMP_EC2_IP=$(aws ec2 describe-instances \
+          INSTANCE_IP=$(aws ec2 describe-instances \
           --instance-ids ${INSTANCE_ID} \
           --query "Reservations[0].Instances[0].PublicIpAddress" \
           --output text)
 
-          echo "TEMP_EC2_IP=${TEMP_EC2_IP}" >> $GITHUB_ENV
+          echo "TEMP_EC2_IP=${INSTANCE_IP}" >> $GITHUB_ENV
+          echo "TEMP_EC2_ID=${INSTANCE_ID}" >> $GITHUB_ENV
           echo "Instance ${INSTANCE_ID} is now running!"
       
       - name: Use the IP address
@@ -116,11 +117,23 @@ jobs:
             sleep 10
           done
       
+      - name: Setup TempEC2 environment
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << 'EOF'
+            sudo dnf update -y
+            sudo dnf install -y docker
+            sudo service docker start
+            sudo usermod -aG docker ec2-user
+            sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+            sudo dnf install -y mariadb105
+          EOF
+
+      
       # 6. Init RDS for testing
       - name: Prepare SQL init file
         run: |
           sed "s|DB_NAME|${{ env.TEST_DB_NAME }}|g" ${INFRA_REPO_PATH}/init.sql.template > ${INFRA_REPO_PATH}/init.sql
-          cat ${INFRA_REPO_PATH}/init.sql.template
 
       - name: Copy SQL init file to Temp EC2
         run: |
@@ -130,7 +143,6 @@ jobs:
       - name: Initialize RDS on Temp EC2
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << 'EOF'
-            sudo dnf install -y mariadb105
             mysql -h ${{ env.RDS_HOST }} \
               -u ${{ secrets.RDS_USER }} \
               -p${{ secrets.RDS_PASSWORD }} \
@@ -138,7 +150,66 @@ jobs:
           EOF
 
       # 7. Pull build images from ECR
+      - name: Pull images from ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << EOF
+            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+            docker pull $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:${{ env.TEMP_IMG_TAG }}
+            docker pull $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:${{ env.TEMP_IMG_TAG }}
+          EOF
+      
+      - name: Copy docker-compose for test in TempEC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
+          ${INFRA_REPO_PATH}/${{ env.COMPOSE_TEST_FILE }}.yml ec2-user@${{ env.TEMP_EC2_IP }}:~/${{ env.COMPOSE_TEST_FILE }}.yml
+          
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
+          ${INFRA_REPO_PATH}/nginx.conf ec2-user@${{ env.TEMP_EC2_IP }}:~
+      
+      - name: Run the application in TempEC2
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << EOF
+            export RDS_HOST=${{ env.RDS_HOST }}
+            export RDS_USER=${{ secrets.RDS_USER }}
+            export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
+            export DB_NAME=${{ env.QA_DB_NAME }}
+            export ECR_REGISTRY=$ECR_REGISTRY
+            export ECR_BACKEND_REPO=${{ env.ECR_BACKEND_REPO }}
+            export ECR_FRONTEND_REPO=${{ env.ECR_FRONTEND_REPO }}
+            export IMAGE_TAG=${{ env.TEMP_IMG_TAG }}
+            docker-compose -f ${{ env.COMPOSE_TEST_FILE }}.yml up -d
+          EOF
+
       # 8. Run integration tests
+      - name: Run integration tests in TempEC2
+        env:
+          TEMP_EC2_IP: ${{ env.TEMP_EC2_IP }}
+        run: |
+          cd ./${{ env.SOURCE_REPO_PATH }}
+          chmod +x integration_test.sh
+          ./integration_test.sh
+      
+      - name: Cleanup testing env
+        if: always()
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << 'EOF'            
+            mysql -h ${{ env.RDS_HOST }} \
+              -u ${{ secrets.RDS_USER }} \
+              -p${{ secrets.RDS_PASSWORD }} \
+              -P 3306 \
+              -e "DROP DATABASE ${{ env.TEST_DB_NAME }}"
+          EOF
+          aws ec2 terminate-instances --instance-ids ${{ env.TEMP_EC2_ID }}
+
+
       # 9. If tests passed, retag the images, otherwise delete them
 
       # - name: Copy source-repo to EC2
