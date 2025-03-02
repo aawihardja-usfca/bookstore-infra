@@ -179,7 +179,7 @@ jobs:
             export RDS_HOST=${{ env.RDS_HOST }}
             export RDS_USER=${{ secrets.RDS_USER }}
             export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
-            export DB_NAME=${{ env.QA_DB_NAME }}
+            export DB_NAME=${{ env.TEST_DB_NAME }}
             export ECR_REGISTRY=$ECR_REGISTRY
             export ECR_BACKEND_REPO=${{ env.ECR_BACKEND_REPO }}
             export ECR_FRONTEND_REPO=${{ env.ECR_FRONTEND_REPO }}
@@ -236,88 +236,3 @@ jobs:
               -e "DROP DATABASE ${{ env.TEST_DB_NAME }}"
           EOF
           aws ec2 terminate-instances --instance-ids ${{ env.TEMP_EC2_ID }}
-
-
-      # - name: Run smoke tests
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.PUBLIC_IP }} << 'EOF'
-      #       echo "Running smoke tests..."
-      #       cd ~/${{ env.SOURCE_REPO_PATH }}
-          
-      #       chmod +x frontend/tests/test.sh
-      #       ./frontend/tests/test.sh
-      #       if [ $? -ne 0 ]; then
-      #         echo "Frontend test failed!"
-      #         exit 1
-      #       fi
-      #       echo "Frontend test passed!"
-          
-      #       chmod +x backend/tests/test.sh
-      #       ./backend/tests/test.sh
-      #       if [ $? -ne 0 ]; then
-      #         echo "Backend test failed!"
-      #         exit 1
-      #       fi
-      #       echo "Backend test passed!"
-      #     EOF
-      
-      # # Maybe move this to another workflow
-      # - name: Get QA EC2 ip address
-      #   id: get-qa-ip
-      #   run: |
-      #     QA_IP=$(aws ec2 describe-instances \
-      #     --filters "Name=tag:Name,Values=${{ env.QA_EC2_NAME }}" \
-      #     --query "Reservations[*].Instances[*].[PublicIpAddress]" \
-      #     --output text)
-      #     echo "qa-ip=$QA_IP" >> $GITHUB_OUTPUT
-
-      # - name: Copy compose-qa.yml to QA EC2
-      #   run: |
-      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/${{ env.COMPOSE_QA_FILENAME }}.yml ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
-      #     scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ${{ env.INFRA_REPO_PATH }}/nginx.conf ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }}:~/
-
-      # - name: Initialize QA database
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << 'EOF'
-      #       sudo yum update -y
-      #       sudo yum install -y mariadb105
-
-      #       mysql -h ${{ env.RDS_HOST }} \
-      #       -u ${{ secrets.RDS_USER }} \
-      #       -p${{ secrets.RDS_PASSWORD }} \
-      #       -P 3306 \
-      #       -e "CREATE DATABASE IF NOT EXISTS ${{ env.QA_DB }};
-      #           USE ${{ env.QA_DB }};
-
-      #           CREATE TABLE IF NOT EXISTS books (
-      #             id INT AUTO_INCREMENT PRIMARY KEY,
-      #             title VARCHAR(100) NOT NULL,
-      #             description TEXT NOT NULL,
-      #             cover TEXT NULL,
-      #             price INT NOT NULL
-      #           );"
-
-      #       echo "QA DB initialized"
-      #     EOF
-      
-      # - name: SSH into QA EC2
-      #   env:
-      #     ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-      #     BACKEND_REPOSITORY: bookstore-backend
-      #     FRONTEND_REPOSITORY: bookstore-frontend
-      #   run: |
-      #     ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ steps.get-qa-ip.outputs.qa-ip }} << EOF
-      #       export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-      #       export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #       export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
-      #       aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
-
-      #       docker pull $ECR_REGISTRY/$BACKEND_REPOSITORY:latest
-      #       docker pull $ECR_REGISTRY/$FRONTEND_REPOSITORY:latest
-
-      #       export RDS_HOST=${{ env.RDS_HOST }}
-      #       export RDS_USER=${{ secrets.RDS_USER }}
-      #       export RDS_PASSWORD=${{ secrets.RDS_PASSWORD }}
-      #       export DB_NAME=${{ env.QA_DB }}
-      #       docker-compose -f ${{ env.COMPOSE_QA_FILENAME }}.yml up -d
-      #     EOF

@@ -13,6 +13,7 @@ jobs:
       AWS_ID: '035863456454'
       INFRA_REPO_PATH: infra-repo
       SSH_FILE_NAME: test-ec2-instance
+      RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
       QA_EC2_NAME: QA Bookstore
       QA_DB_NAME: qa_db
       COMPOSE_FILE: compose
@@ -97,10 +98,37 @@ jobs:
             echo "Running Digest is: $RUNNING_DIGEST"
           fi
 
-      - name: Compare image digests
+      - name: Deploy updated container on QA EC2
+        if: ${{ env.LATEST_DIGEST != env.RUNNING_DIGEST }}
         run: |
-          if [ "$LATEST_DIGEST" != "$RUNNING_DIGEST" ]; then
-            echo "New image detected!"
-          else
-            echo "No new image detected."
-          fi
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.QA_EC2_IP }} << 'EOF'
+            export ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+            export ECR_BACKEND_REPO="${{ env.ECR_BACKEND_REPO }}"
+            export ECR_FRONTEND_REPO="${{ env.ECR_FRONTEND_REPO }}"
+            export IMAGE_TAG="latest"
+            export RDS_HOST="${{ env.RDS_HOST }}"
+            export RDS_USER="${{ secrets.RDS_USER }}"
+            export RDS_PASSWORD="${{ secrets.RDS_PASSWORD }}"
+            export DB_NAME="${{ env.QA_DB_NAME }}"
+
+            echo "Environment variables set:"
+            
+            echo "Stopping running containers..."
+            docker compose -f ${{ env.COMPOSE_FILE }}.yml down
+            
+            echo "Removing unused images..."
+            docker image prune -f
+
+            echo "Logging into AWS ECR..."
+            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            export AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+            echo "Pulling latest images..."
+            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:latest
+            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:latest
+
+            echo "Restarting services with Docker Compose..."
+            docker compose -f ${{ env.COMPOSE_FILE }}.yml up -d
+          EOF
