@@ -16,7 +16,8 @@ jobs:
       RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
       QA_EC2_NAME: QA Bookstore
       QA_DB_NAME: qa_db
-      COMPOSE_FILE: compose
+      COMPOSE_FILE: compose.qa.yml
+      NGINX_CONF: nginx.qa.conf
       ECR_BACKEND_REPO: bookstore-backend
       ECR_FRONTEND_REPO: bookstore-frontend
 
@@ -55,10 +56,10 @@ jobs:
       - name: Copy docker-compose to QA EC2
         run: |
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
-          ${INFRA_REPO_PATH}/${{ env.COMPOSE_FILE }}.yml ec2-user@${{ env.QA_EC2_IP }}:~
+          ${INFRA_REPO_PATH}/${{ env.COMPOSE_FILE }} ec2-user@${{ env.QA_EC2_IP }}:~/compose.yml
           
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
-          ${INFRA_REPO_PATH}/nginx.conf ec2-user@${{ env.QA_EC2_IP }}:~
+          ${INFRA_REPO_PATH}/${{ env.NGINX_CONF }} ec2-user@${{ env.QA_EC2_IP }}:~/nginx.conf
 
       # 2. Compare image digest to see if it needs updating
       - name: Login to AWS ECR
@@ -115,7 +116,7 @@ jobs:
             echo "Environment variables set:"
             
             echo "Stopping running containers..."
-            docker compose -f ${{ env.COMPOSE_FILE }}.yml down
+            docker compose -f compose.yml down
             
             echo "Removing unused images..."
             docker image prune -f
@@ -131,7 +132,7 @@ jobs:
             docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:latest
 
             echo "Restarting services with Docker Compose..."
-            docker compose -f ${{ env.COMPOSE_FILE }}.yml up -d
+            docker compose -f compose.yml up -d
           EOF
       
       # 3b. If there is no new image, just restart compose
@@ -148,6 +149,9 @@ jobs:
             export RDS_PASSWORD="${{ secrets.RDS_PASSWORD }}"
             export DB_NAME="${{ env.QA_DB_NAME }}"
 
+            echo "Stopping running containers..."
+            docker compose -f compose.yml down
+
             echo "Restarting services with Docker Compose..."
-            docker compose -f ${{ env.COMPOSE_FILE }}.yml up -d
+            docker compose -f compose.yml up -d
           EOF

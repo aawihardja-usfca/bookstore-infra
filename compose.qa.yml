@@ -1,6 +1,6 @@
 services:
   backend:
-    image: 035863456454.dkr.ecr.us-east-1.amazonaws.com/bookstore-backend:latest
+    image: ${ECR_REGISTRY}/${ECR_BACKEND_REPO}:${IMAGE_TAG}
     ports:
       - "8800:8800"
     environment:
@@ -10,7 +10,7 @@ services:
       DB_NAME: ${DB_NAME}
 
   frontend:
-    image: 035863456454.dkr.ecr.us-east-1.amazonaws.com/bookstore-frontend:latest
+    image: ${ECR_REGISTRY}/${ECR_FRONTEND_REPO}:${IMAGE_TAG}
     ports:
       - "5173:5173"
     depends_on:
@@ -20,8 +20,10 @@ services:
     image: nginx:latest
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - frontend
       - backend
