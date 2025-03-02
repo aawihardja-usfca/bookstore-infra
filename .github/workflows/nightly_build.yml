@@ -16,7 +16,8 @@ jobs:
       AWS_ID: '035863456454'
       RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
       TEST_DB_NAME: test_db
-      COMPOSE_FILE: compose
+      COMPOSE_FILE: compose.yml
+      NGINX_CONF: nginx.conf
       TEMP_EC2_NAME: TEMP Bookstore
       TEMP_IMG_TAG: temp
       ECR_BACKEND_REPO: bookstore-backend
@@ -55,17 +56,17 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run : |
-          docker build -t $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:${{ env.TEMP_IMG_TAG }} ./${{ env.SOURCE_REPO_PATH }}/backend
-          docker build -t $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:${{ env.TEMP_IMG_TAG }} ./${{ env.SOURCE_REPO_PATH }}/frontend
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          docker build -t $ECR_REGISTRY/${ECR_BACKEND_REPO}:${TEMP_IMG_TAG} ./${SOURCE_REPO_PATH}/backend
+          docker build -t $ECR_REGISTRY/${ECR_FRONTEND_REPO}:${TEMP_IMG_TAG} ./${SOURCE_REPO_PATH}/frontend
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
       # 4. Push images to ECR
       - name: Push Docker images
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker push $ECR_REGISTRY/${{ env.ECR_BACKEND_REPO }}:${{ env.TEMP_IMG_TAG }}
-          docker push $ECR_REGISTRY/${{ env.ECR_FRONTEND_REPO }}:${{ env.TEMP_IMG_TAG }}
+          docker push $ECR_REGISTRY/${ECR_BACKEND_REPO}:${TEMP_IMG_TAG}
+          docker push $ECR_REGISTRY/${ECR_FRONTEND_REPO}:${TEMP_IMG_TAG}
 
       # 5. Spin up a temporary EC2 & Wait until it is running
       - name: Launch TempEC2
@@ -91,19 +92,19 @@ jobs:
           echo "Instance ${INSTANCE_ID} is now running!"
       
       - name: Use the IP address
-        run: echo "TEMP EC2 IP=${{ env.TEMP_EC2_IP }}"
+        run: echo "TEMP EC2 IP=${TEMP_EC2_IP}"
 
       - name: Copy SSH private key to Github env
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
-          chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${SSH_FILE_NAME}.pem
+          chmod 400 ~/.ssh/${SSH_FILE_NAME}.pem
 
       - name: Wait for SSH
         run: |
           max_attempts=10
           attempt=0
-          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} 'echo "SSH ready"'; do
+          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/${SSH_FILE_NAME}.pem ec2-user@${TEMP_EC2_IP} 'echo "SSH ready"'; do
             attempt=$((attempt+1))
             if [ $attempt -eq $max_attempts ]; then
               echo "SSH is not available after $max_attempts attempts. Exiting."
@@ -115,7 +116,7 @@ jobs:
       
       - name: Setup TempEC2 environment
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << 'EOF'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_FILE_NAME}.pem ec2-user@${TEMP_EC2_IP} << 'EOF'
             sudo dnf update -y
             sudo dnf install -y docker
             sudo service docker start
@@ -132,12 +133,12 @@ jobs:
       # 6. Init RDS for testing
       - name: Prepare SQL init file
         run: |
-          sed "s|DB_NAME|${{ env.TEST_DB_NAME }}|g" ${INFRA_REPO_PATH}/init.sql.template > ${INFRA_REPO_PATH}/init.sql
+          sed "s|DB_NAME|${TEST_DB_NAME}|g" ${INFRA_REPO_PATH}/init.sql.template > ${INFRA_REPO_PATH}/init.sql
 
       - name: Copy SQL init file to Temp EC2
         run: |
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
-          ${INFRA_REPO_PATH}/init.sql ec2-user@${{ env.TEMP_EC2_IP }}:~/init.sql
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_FILE_NAME}.pem \
+          ${INFRA_REPO_PATH}/init.sql ec2-user@${TEMP_EC2_IP}:~/init.sql
 
       - name: Initialize RDS on Temp EC2
         run: |
@@ -165,11 +166,11 @@ jobs:
       
       - name: Copy docker-compose for test in TempEC2
         run: |
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
-          ${INFRA_REPO_PATH}/${{ env.COMPOSE_FILE }}.yml ec2-user@${{ env.TEMP_EC2_IP }}:~/${{ env.COMPOSE_FILE }}.yml
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_FILE_NAME}.pem \
+          ${INFRA_REPO_PATH}/${COMPOSE_FILE} ec2-user@${TEMP_EC2_IP}:~/compose.yml
           
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
-          ${INFRA_REPO_PATH}/nginx.conf ec2-user@${{ env.TEMP_EC2_IP }}:~
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_FILE_NAME}.pem \
+          ${INFRA_REPO_PATH}/${NGINX_CONF} ec2-user@${TEMP_EC2_IP}:~/nginx.conf
       
       - name: Run the application in TempEC2
         env:
@@ -184,7 +185,7 @@ jobs:
             export ECR_BACKEND_REPO=${{ env.ECR_BACKEND_REPO }}
             export ECR_FRONTEND_REPO=${{ env.ECR_FRONTEND_REPO }}
             export IMAGE_TAG=${{ env.TEMP_IMG_TAG }}
-            docker-compose -f ${{ env.COMPOSE_FILE }}.yml up -d
+            docker-compose -f ${{ env.COMPOSE_FILE }} up -d
           EOF
 
       # 8. Run integration tests
@@ -193,7 +194,7 @@ jobs:
         env:
           TEMP_EC2_IP: ${{ env.TEMP_EC2_IP }}
         run: |
-          cd ./${{ env.SOURCE_REPO_PATH }}
+          cd ./${SOURCE_REPO_PATH}
           chmod +x integration_test.sh
           ./integration_test.sh
     
@@ -203,13 +204,13 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run : |
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
           TIMESTAMP=$(date +'%Y%m%d%H%M')
-          docker tag $ECR_REGISTRY/$ECR_BACKEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_BACKEND_REPO:latest
-          docker tag $ECR_REGISTRY/$ECR_BACKEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_BACKEND_REPO:$TIMESTAMP
-          docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_FRONTEND_REPO:latest
-          docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:${{ env.TEMP_IMG_TAG }} $ECR_REGISTRY/$ECR_FRONTEND_REPO:$TIMESTAMP
+          docker tag $ECR_REGISTRY/$ECR_BACKEND_REPO:${TEMP_IMG_TAG} $ECR_REGISTRY/$ECR_BACKEND_REPO:latest
+          docker tag $ECR_REGISTRY/$ECR_BACKEND_REPO:${TEMP_IMG_TAG} $ECR_REGISTRY/$ECR_BACKEND_REPO:$TIMESTAMP
+          docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:${TEMP_IMG_TAG} $ECR_REGISTRY/$ECR_FRONTEND_REPO:latest
+          docker tag $ECR_REGISTRY/$ECR_FRONTEND_REPO:${TEMP_IMG_TAG} $ECR_REGISTRY/$ECR_FRONTEND_REPO:$TIMESTAMP
 
           docker push $ECR_REGISTRY/$ECR_BACKEND_REPO:latest
           docker push $ECR_REGISTRY/$ECR_BACKEND_REPO:$TIMESTAMP
@@ -222,17 +223,17 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          aws ecr batch-delete-image --repository-name $ECR_BACKEND_REPO --image-ids imageTag=${{ env.TEMP_IMG_TAG }}
-          aws ecr batch-delete-image --repository-name $ECR_FRONTEND_REPO --image-ids imageTag=${{ env.TEMP_IMG_TAG }}
+          aws ecr batch-delete-image --repository-name $ECR_BACKEND_REPO --image-ids imageTag=${TEMP_IMG_TAG}
+          aws ecr batch-delete-image --repository-name $ECR_FRONTEND_REPO --image-ids imageTag=${TEMP_IMG_TAG}
 
       - name: Cleanup TEMP EC2 env
         if: always()
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.TEMP_EC2_IP }} << 'EOF'            
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${SSH_FILE_NAME}.pem ec2-user@${TEMP_EC2_IP} << 'EOF'            
             mysql -h ${{ env.RDS_HOST }} \
               -u ${{ secrets.RDS_USER }} \
               -p${{ secrets.RDS_PASSWORD }} \
               -P 3306 \
               -e "DROP DATABASE ${{ env.TEST_DB_NAME }}"
           EOF
-          aws ec2 terminate-instances --instance-ids ${{ env.TEMP_EC2_ID }}
+          aws ec2 terminate-instances --instance-ids ${TEMP_EC2_ID}
