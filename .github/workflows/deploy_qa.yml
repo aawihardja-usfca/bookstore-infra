@@ -1,0 +1,106 @@
+name: Deploy to QA EC2
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-new-image:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      AWS_ID: '035863456454'
+      INFRA_REPO_PATH: infra-repo
+      SSH_FILE_NAME: test-ec2-instance
+      QA_EC2_NAME: QA Bookstore
+      QA_DB_NAME: qa_db
+      COMPOSE_FILE: compose
+      ECR_BACKEND_REPO: bookstore-backend
+      ECR_FRONTEND_REPO: bookstore-frontend
+
+    steps:
+      # 1. Make sure the docker-compose file and nginx.conf are up to date
+      - name: Checkout infrastructure repo
+        uses: actions/checkout@v4
+        with:
+          repository: aawihardja-usfca/bookstore-infra
+          path: ${{ env.INFRA_REPO_PATH }}
+          ref: test
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Get QA EC2 IP address
+        run: |
+          INSTANCE_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.QA_EC2_NAME }}" \
+          --query "Reservations[*].Instances[*].[PublicIpAddress]" \
+          --output text)
+          
+          echo "QA_EC2_IP=${INSTANCE_IP}" >> $GITHUB_ENV
+
+      - name: Copy SSH private key to Github env
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+          chmod 400 ~/.ssh/${{ env.SSH_FILE_NAME }}.pem
+      
+      - name: Copy docker-compose to QA EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
+          ${INFRA_REPO_PATH}/${{ env.COMPOSE_FILE }}.yml ec2-user@${{ env.QA_EC2_IP }}:~
+          
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
+          ${INFRA_REPO_PATH}/nginx.conf ec2-user@${{ env.QA_EC2_IP }}:~
+
+    # 2. Compare image digest to see if it needs updating
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get latest image digest from ECR
+        id: latest_image
+        run: |
+          LATEST_DIGEST=$(aws ecr describe-images \
+            --repository-name $ECR_BACKEND_REPO \
+            --region $AWS_REGION \
+            --query "sort_by(imageDetails,& imagePushedAt)[-1].imageDigest" \
+            --output text)
+          echo "LATEST_DIGEST=$LATEST_DIGEST" >> $GITHUB_ENV
+          echo "Latest Digest is: $LATEST_DIGEST"
+
+      - name: Get running container digest from QA EC2
+        id: running_image          
+        run: |
+          IMG_NAME="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:latest"
+
+          # SSH into QA EC2, suppress login messages, and retrieve the digest
+          RUNNING_DIGEST=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
+            -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null ec2-user@${{ env.QA_EC2_IP }} \
+            "docker inspect --format='{{index .RepoDigests 0}}' \"$IMG_NAME\" 2>/dev/null | cut -d'@' -f2 || echo NOT_FOUND")
+
+          # Remove any unexpected output
+          RUNNING_DIGEST=$(echo "$RUNNING_DIGEST" | tr -d '\r' | awk '{$1=$1;print}')
+
+          # Validate output
+          if [[ "$RUNNING_DIGEST" == "NOT_FOUND" || -z "$RUNNING_DIGEST" ]]; then
+            echo "No running container found for $IMG_NAME"
+            echo "RUNNING_DIGEST=" >> $GITHUB_ENV  # Set an empty value
+          else
+            echo "RUNNING_DIGEST=$RUNNING_DIGEST" >> $GITHUB_ENV
+            echo "Running Digest is: $RUNNING_DIGEST"
+          fi
+
+      - name: Compare image digests
+        run: |
+          if [ "$LATEST_DIGEST" != "$RUNNING_DIGEST" ]; then
+            echo "New image detected!"
+          else
+            echo "No new image detected."
+          fi

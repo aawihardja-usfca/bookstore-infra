@@ -16,10 +16,7 @@ jobs:
       AWS_ID: '035863456454'
       RDS_HOST: database-bookstore.csn8rgd2nomm.us-east-1.rds.amazonaws.com
       TEST_DB_NAME: test_db
-      QA_DB_NAME: qa_db
-      COMPOSE_TEST_FILE: compose-test
-      COMPOSE_QA_FILE: compose-qa
-      QA_EC2_NAME: QA Bookstore
+      COMPOSE_FILE: compose
       TEMP_EC2_NAME: TEMP Bookstore
       TEMP_IMG_TAG: temp
       ECR_BACKEND_REPO: bookstore-backend
@@ -78,7 +75,6 @@ jobs:
           --instance-type t2.micro \
           --key-name test-ec2-instance \
           --security-group-ids sg-01f7f4b93d2a0f127 sg-07486764dc18ccdcc \
-          --user-data file://${{ env.INFRA_REPO_PATH }}/userdata.sh \
           --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TEMP_EC2_NAME }}}]' \
           --query "Instances[0].InstanceId" \
           --output text)
@@ -126,10 +122,13 @@ jobs:
             sudo usermod -aG docker ec2-user
             sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
             sudo chmod +x /usr/local/bin/docker-compose
-            sudo dnf install -y mariadb105
+            if ! rpm -q mariadb105; then
+              sudo dnf install -y mariadb105
+            else
+              echo "mariadb already installed"
+            fi
           EOF
 
-      
       # 6. Init RDS for testing
       - name: Prepare SQL init file
         run: |
@@ -167,7 +166,7 @@ jobs:
       - name: Copy docker-compose for test in TempEC2
         run: |
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
-          ${INFRA_REPO_PATH}/${{ env.COMPOSE_TEST_FILE }}.yml ec2-user@${{ env.TEMP_EC2_IP }}:~/${{ env.COMPOSE_TEST_FILE }}.yml
+          ${INFRA_REPO_PATH}/${{ env.COMPOSE_FILE }}.yml ec2-user@${{ env.TEMP_EC2_IP }}:~/${{ env.COMPOSE_FILE }}.yml
           
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
           ${INFRA_REPO_PATH}/nginx.conf ec2-user@${{ env.TEMP_EC2_IP }}:~
@@ -185,7 +184,7 @@ jobs:
             export ECR_BACKEND_REPO=${{ env.ECR_BACKEND_REPO }}
             export ECR_FRONTEND_REPO=${{ env.ECR_FRONTEND_REPO }}
             export IMAGE_TAG=${{ env.TEMP_IMG_TAG }}
-            docker-compose -f ${{ env.COMPOSE_TEST_FILE }}.yml up -d
+            docker-compose -f ${{ env.COMPOSE_FILE }}.yml up -d
           EOF
 
       # 8. Run integration tests
