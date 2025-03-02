@@ -60,7 +60,7 @@ jobs:
           scp -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem \
           ${INFRA_REPO_PATH}/nginx.conf ec2-user@${{ env.QA_EC2_IP }}:~
 
-    # 2. Compare image digest to see if it needs updating
+      # 2. Compare image digest to see if it needs updating
       - name: Login to AWS ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -98,6 +98,7 @@ jobs:
             echo "Running Digest is: $RUNNING_DIGEST"
           fi
 
+      # 3a. If there is a new image, stop running containers, pull latest image, and restart compose
       - name: Deploy updated container on QA EC2
         if: ${{ env.LATEST_DIGEST != env.RUNNING_DIGEST }}
         run: |
@@ -128,6 +129,24 @@ jobs:
             echo "Pulling latest images..."
             docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_BACKEND_REPO }}:latest
             docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:latest
+
+            echo "Restarting services with Docker Compose..."
+            docker compose -f ${{ env.COMPOSE_FILE }}.yml up -d
+          EOF
+      
+      # 3b. If there is no new image, just restart compose
+      - name: Restart container if digest is unchanged
+        if: ${{ env.LATEST_DIGEST == env.RUNNING_DIGEST }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/${{ env.SSH_FILE_NAME }}.pem ec2-user@${{ env.QA_EC2_IP }} << 'EOF'
+            export ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+            export ECR_BACKEND_REPO="${{ env.ECR_BACKEND_REPO }}"
+            export ECR_FRONTEND_REPO="${{ env.ECR_FRONTEND_REPO }}"
+            export IMAGE_TAG="latest"
+            export RDS_HOST="${{ env.RDS_HOST }}"
+            export RDS_USER="${{ secrets.RDS_USER }}"
+            export RDS_PASSWORD="${{ secrets.RDS_PASSWORD }}"
+            export DB_NAME="${{ env.QA_DB_NAME }}"
 
             echo "Restarting services with Docker Compose..."
             docker compose -f ${{ env.COMPOSE_FILE }}.yml up -d
