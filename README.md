@@ -143,12 +143,10 @@ It might take a while for these changes to take effect.
 ---
 
 ### 10. Obtain an SSL certificate
-We need to obtain a certificate to enable HTTPS requests. You can start by ssh-ing into QA Bookstore EC2, then executing:
-```
-sudo dnf -y install certbot
-sudo certbot certonly --standalone -d www.<your-domain>
-```
-This will store your certificates under: ```/etc/letsencrypt/live/www.<your-domain>/```
+We need to obtain a certificate to enable HTTPS requests. You can start by ssh-ing into QA Bookstore EC2, then executing
+```sudo dnf -y install certbot```
+To obtain the certificate, run ```sudo certbot certonly --standalone -d www.<your-domain>```
+This will store your certificates under ```/etc/letsencrypt/live/www.<your-domain>/```
 
 ---
 
